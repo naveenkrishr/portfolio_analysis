@@ -5,7 +5,10 @@ Uses the local Qwen2.5-14B model (via MLXChatModel) to analyze the portfolio
 and produce prioritized recommendations + per-ticker analysis.
 
 Step 4: enriched with live technical data from Agent 3 (SMA, RSI, MACD, Bollinger).
-        Falls back gracefully if market_data is absent.
+Step 5: enriched with fundamentals from Agent 4 (P/E, ROE, FCF, analyst ratings).
+Step 6: enriched with news & sentiment from Agent 5 (recent headlines, bullish/bearish).
+        Falls back gracefully if any data source is absent.
+        Data warnings (cache fallbacks, partial failures) shown at prompt top.
 """
 from __future__ import annotations
 
@@ -32,6 +35,9 @@ def _build_prompt(
     holdings: list[Holding],
     total_value: float,
     market_data: dict | None = None,
+    fundamentals: dict | None = None,
+    news_data: dict | None = None,
+    data_warnings: list[str] | None = None,
 ) -> str:
     today = date.today().strftime("%B %d, %Y")
 
@@ -52,21 +58,55 @@ def _build_prompt(
         )
     holdings_table = "\n".join(rows)
 
-    # Build MARKET DATA section from Agent 3 technicals
+    # Data freshness warnings (cache fallbacks, partial failures)
+    warnings_section = ""
+    if data_warnings:
+        lines = "\n".join(f"  - {w}" for w in data_warnings)
+        warnings_section = (
+            "\nDATA FRESHNESS NOTICE (some data may be from cache)\n"
+            + lines
+            + "\nAccount for potential staleness in your analysis.\n"
+        )
+
+    # MARKET DATA section from Agent 3 technicals
     market_section = ""
     if market_data:
         lines = []
         for ticker, snap in market_data.items():
             lines.append(f"  {snap.summary()}")
         market_section = (
-            "\nMARKET DATA (live technicals — use this to ground your analysis)\n"
+            "\nMARKET DATA (live technicals — SMA, RSI, MACD, Bollinger)\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+
+    # FUNDAMENTALS section from Agent 4
+    fundamentals_section = ""
+    if fundamentals:
+        lines = []
+        for ticker, snap in fundamentals.items():
+            lines.append(f"  {snap.summary()}")
+        fundamentals_section = (
+            "\nFUNDAMENTALS (P/E, ROE, FCF, analyst ratings — use to assess valuation)\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+
+    # NEWS section from Agent 5
+    news_section = ""
+    if news_data:
+        lines = []
+        for ticker, snap in news_data.items():
+            lines.append(snap.summary())
+        news_section = (
+            "\nRECENT NEWS & SENTIMENT (last 7 days — factor into your recommendations)\n"
             + "\n".join(lines)
             + "\n"
         )
 
     return f"""\
 Portfolio Analysis Request — {today}
-
+{warnings_section}
 PORTFOLIO OVERVIEW
   Total Value:   ${total_value:>12,.0f}
   Invested:      ${invested:>12,.0f}  ({invested/total_value*100:.1f}%)
@@ -77,7 +117,7 @@ HOLDINGS
   {"Ticker":<8} {"Name":<42} {"Shares":>14}  {"Price":>10}  {"Value":>12}  {"Alloc":>6}  Account
   {"-"*120}
 {holdings_table}
-{market_section}
+{market_section}{fundamentals_section}{news_section}
 Please analyze this portfolio and respond in EXACTLY this format:
 
 ## RECOMMENDED ACTIONS
@@ -119,8 +159,17 @@ def run(state: PortfolioState, llm) -> PortfolioState:
     holdings: list[Holding] = state["holdings"]
     total_value: float      = state["total_value"]
     market_data             = state.get("market_data")
+    fundamentals            = state.get("fundamentals")
+    news_data               = state.get("news_data")
+    data_warnings           = state.get("data_warnings") or []
 
-    prompt = _build_prompt(holdings, total_value, market_data)
+    prompt = _build_prompt(
+        holdings, total_value,
+        market_data=market_data,
+        fundamentals=fundamentals,
+        news_data=news_data,
+        data_warnings=data_warnings,
+    )
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=prompt),

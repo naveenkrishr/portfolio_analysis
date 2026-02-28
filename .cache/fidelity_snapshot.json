@@ -1,0 +1,59 @@
+{
+  "fetched_at": "2026-02-27T21:18:04",
+  "holdings": [
+    {
+      "ticker": "FCASH",
+      "name": "HELD IN FCASH",
+      "shares": 0.0,
+      "price": 0.0,
+      "value": 487.24,
+      "account": "Fidelity-Z24244611",
+      "asset_type": "cash"
+    },
+    {
+      "ticker": "QQMG",
+      "name": "INVESCO EXCHANGE-TRADED FD TR ESG NASDAQ 100",
+      "shares": 1111.0,
+      "price": 41.4022,
+      "value": 45997.84,
+      "account": "Fidelity-Z24244611",
+      "asset_type": "etf"
+    },
+    {
+      "ticker": "SNOW",
+      "name": "SNOWFLAKE INC. COMMON STOCK",
+      "shares": 644.0,
+      "price": 168.41,
+      "value": 108456.04,
+      "account": "Fidelity-Z24244611",
+      "asset_type": "stock"
+    },
+    {
+      "ticker": "VOO",
+      "name": "VANGUARD INDEX FUNDS S&P 500 ETF USD",
+      "shares": 198.108,
+      "price": 631.04,
+      "value": 125014.07,
+      "account": "Fidelity-Z24244611",
+      "asset_type": "etf"
+    },
+    {
+      "ticker": "SPAXX",
+      "name": "HELD IN MONEY MARKET",
+      "shares": 0.0,
+      "price": 0.0,
+      "value": 9100.51,
+      "account": "Fidelity-Z31897692",
+      "asset_type": "cash"
+    },
+    {
+      "ticker": "VOO",
+      "name": "VANGUARD INDEX FUNDS S&P 500 ETF USD",
+      "shares": 100.0,
+      "price": 631.04,
+      "value": 63104.0,
+      "account": "Fidelity-Z31897692",
+      "asset_type": "etf"
+    }
+  ]
+}

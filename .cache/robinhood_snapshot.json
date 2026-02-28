@@ -1,0 +1,32 @@
+{
+  "fetched_at": "2026-02-27T21:18:04",
+  "holdings": [
+    {
+      "ticker": "TSLA",
+      "name": "Tesla",
+      "shares": 84.666654,
+      "price": 401.8,
+      "value": 34019.06,
+      "account": "Robinhood",
+      "asset_type": "stock"
+    },
+    {
+      "ticker": "NVDA",
+      "name": "NVIDIA",
+      "shares": 190.0,
+      "price": 177.8,
+      "value": 33782.0,
+      "account": "Robinhood",
+      "asset_type": "stock"
+    },
+    {
+      "ticker": "QQMG",
+      "name": "Invesco Exchange-Traded Fund Trust II Invesco ESG ",
+      "shares": 7.0,
+      "price": 41.4022,
+      "value": 289.82,
+      "account": "Robinhood",
+      "asset_type": "etf"
+    }
+  ]
+}

@@ -214,6 +214,18 @@ def _risk_block(raw: str) -> str:
 </div>"""
 
 
+def _warnings_banner(warnings: list[str]) -> str:
+    if not warnings:
+        return ""
+    items = "".join(f"<li style='margin:4px 0;'>{w}</li>" for w in warnings)
+    return f"""\
+<div style="background:#fff8e1;border-left:4px solid #ffc107;padding:15px;border-radius:6px;margin:0 0 24px 0;">
+  <strong style="color:#856404;">&#9888; Data Freshness Notice</strong>
+  <ul style="margin:8px 0 0 0;padding-left:18px;color:#555;">{items}</ul>
+  <p style="margin:8px 0 0 0;font-size:12px;color:#888;">Some positions may reflect cached data. Verify figures before acting.</p>
+</div>"""
+
+
 def _footer(today: str) -> str:
     return f"""\
 <div style="margin-top:30px;padding:12px;background:#f9f9f9;border-radius:6px;font-size:12px;color:#999;">
@@ -227,9 +239,10 @@ def _footer(today: str) -> str:
 # ── HTML assembler ────────────────────────────────────────────────────────────
 
 def _build_html(state: PortfolioState) -> str:
-    holdings:    list[Holding] = state["holdings"]
-    total_value: float         = state["total_value"]
-    raw:         str           = state["analysis"].raw_llm_output or ""
+    holdings:     list[Holding] = state["holdings"]
+    total_value:  float         = state["total_value"]
+    raw:          str           = state["analysis"].raw_llm_output or ""
+    warnings:     list[str]     = state.get("data_warnings") or []
     today = date.today().strftime("%B %d, %Y")
 
     equity = [h for h in holdings if h.asset_type != "cash"]
@@ -242,6 +255,7 @@ def _build_html(state: PortfolioState) -> str:
 
     body = "".join([
         _header(total_value, len(equity), today),
+        _warnings_banner(warnings),
         _holdings_table(holdings, total_value),
         _actions_table(s_actions)      if s_actions    else "",
         _executive_summary(s_summary)  if s_summary    else "",

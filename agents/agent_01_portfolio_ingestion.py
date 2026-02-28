@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from cache.holdings_cache import load as cache_load, save as cache_save
 from state.models import Holding
 from tools import robinhood_client, fidelity_client
 
@@ -156,14 +157,37 @@ def _merge(rh: list[Holding], fid: list[Holding]) -> list[Holding]:
     return merged
 
 
+# ── Cache helpers ─────────────────────────────────────────────────────────────
+
+def _from_cache(broker: str) -> tuple[list[Holding], str] | None:
+    """Load holdings from the on-disk snapshot for a broker."""
+    result = cache_load(broker)
+    if result is None:
+        return None
+    dicts, fetched_at = result
+    holdings = []
+    for d in dicts:
+        try:
+            holdings.append(Holding(**d))
+        except Exception:
+            pass
+    return holdings, fetched_at
+
+
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-async def run() -> list[Holding]:
+async def run() -> tuple[list[Holding], list[str]]:
     """
-    Fetch holdings from both brokers concurrently and return merged list.
-    Called from main.py via asyncio.run().
+    Fetch holdings from both brokers concurrently.
+
+    Returns:
+        (holdings, data_warnings)
+        data_warnings is a list of human-readable strings describing any fallbacks
+        or partial failures that the rest of the pipeline should know about.
     """
     import asyncio
+
+    data_warnings: list[str] = []
 
     print("Fetching Robinhood holdings...", flush=True)
     print("Fetching Fidelity holdings (Playwright — may take ~10s)...", flush=True)
@@ -174,26 +198,57 @@ async def run() -> list[Holding]:
         return_exceptions=True,
     )
 
+    # ── Robinhood ──────────────────────────────────────────────────────────
     rh_holdings: list[Holding] = []
     if isinstance(rh_raw, Exception):
-        print(f"  [WARN] Robinhood failed: {rh_raw}")
+        print(f"  [WARN] Robinhood live fetch failed: {rh_raw}")
+        cached = _from_cache("robinhood")
+        if cached:
+            rh_holdings, fetched_at = cached
+            msg = f"Robinhood data from cache (last fetched: {fetched_at}) — live fetch failed."
+            print(f"  [FALLBACK] {msg}")
+            data_warnings.append(msg)
+        else:
+            data_warnings.append("Robinhood fetch failed and no cache available — positions excluded.")
     elif isinstance(rh_raw, dict):
         rh_holdings = _parse_robinhood(rh_raw)
         print(f"  Robinhood: {len(rh_holdings)} positions")
+        cache_save("robinhood", [h.model_dump() for h in rh_holdings])
     else:
-        print(f"  [WARN] Robinhood unexpected response type: {type(rh_raw)} — {str(rh_raw)[:200]}")
+        print(f"  [WARN] Robinhood unexpected response: {type(rh_raw)} — {str(rh_raw)[:200]}")
+        data_warnings.append(f"Robinhood returned unexpected response type: {type(rh_raw).__name__}.")
 
+    # ── Fidelity ───────────────────────────────────────────────────────────
     fid_holdings: list[Holding] = []
     if isinstance(fid_raw, Exception):
-        print(f"  [WARN] Fidelity failed: {fid_raw}")
+        print(f"  [WARN] Fidelity live fetch failed: {fid_raw}")
+        cached = _from_cache("fidelity")
+        if cached:
+            fid_holdings, fetched_at = cached
+            msg = f"Fidelity data from cache (last fetched: {fetched_at}) — live fetch failed."
+            print(f"  [FALLBACK] {msg}")
+            data_warnings.append(msg)
+        else:
+            data_warnings.append("Fidelity fetch failed and no cache available — positions excluded.")
     elif isinstance(fid_raw, dict):
         if "error" in fid_raw and not fid_raw.get("holdings"):
-            print(f"  [WARN] Fidelity error: {fid_raw['error']}")
+            err = fid_raw["error"]
+            print(f"  [WARN] Fidelity error: {err}")
+            cached = _from_cache("fidelity")
+            if cached:
+                fid_holdings, fetched_at = cached
+                msg = f"Fidelity data from cache (last fetched: {fetched_at}) — server returned error: {str(err)[:120]}"
+                print(f"  [FALLBACK] {msg}")
+                data_warnings.append(msg)
+            else:
+                data_warnings.append(f"Fidelity server error and no cache available: {str(err)[:120]}")
         else:
             fid_holdings = _parse_fidelity(fid_raw)
             print(f"  Fidelity: {len(fid_holdings)} positions")
+            cache_save("fidelity", [h.model_dump() for h in fid_holdings])
     else:
-        print(f"  [WARN] Fidelity unexpected response type: {type(fid_raw)}")
+        print(f"  [WARN] Fidelity unexpected response: {type(fid_raw)}")
+        data_warnings.append(f"Fidelity returned unexpected response type: {type(fid_raw).__name__}.")
 
     all_holdings = _merge(rh_holdings, fid_holdings)
 
@@ -203,4 +258,4 @@ async def run() -> list[Holding]:
             "Check MCP server logs or use --mock for offline testing."
         )
 
-    return all_holdings
+    return all_holdings, data_warnings

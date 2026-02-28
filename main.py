@@ -4,6 +4,8 @@ Portfolio Analysis — Runner
 ============================
 Live portfolio (Robinhood MCP + Fidelity MCP)
   → Agent 3  (market data: price history + technicals via yfinance)
+  → Agent 4  (fundamentals: P/E, ROE, FCF, analyst ratings via yfinance)
+  → Agent 5  (news & sentiment: recent headlines via yfinance)
   → Agent 9  (LLM analysis — Qwen2.5-14B)
   → Agent 10 (HTML email via Gmail MCP)
 
@@ -25,7 +27,13 @@ from langgraph.graph import END, START, StateGraph
 from mlx_wrapper import MLXChatModel
 from state.graph_state import PortfolioState
 from state.models import Holding
-from agents import agent_03_market_data, agent_09_llm_analysis, agent_10_report_delivery
+from agents import (
+    agent_03_market_data,
+    agent_04_fundamental,
+    agent_05_news_sentiment,
+    agent_09_llm_analysis,
+    agent_10_report_delivery,
+)
 
 load_dotenv()
 
@@ -36,9 +44,13 @@ def build_graph(llm: MLXChatModel, send_email: bool = True):
     agent_09_node = partial(agent_09_llm_analysis.run, llm=llm)
     graph = StateGraph(PortfolioState)
     graph.add_node("agent_03", agent_03_market_data.run)
+    graph.add_node("agent_04", agent_04_fundamental.run)
+    graph.add_node("agent_05", agent_05_news_sentiment.run)
     graph.add_node("agent_09", agent_09_node)
     graph.add_edge(START, "agent_03")
-    graph.add_edge("agent_03", "agent_09")
+    graph.add_edge("agent_03", "agent_04")
+    graph.add_edge("agent_04", "agent_05")
+    graph.add_edge("agent_05", "agent_09")
     if send_email:
         graph.add_node("agent_10", agent_10_report_delivery.run)
         graph.add_edge("agent_09", "agent_10")
@@ -48,8 +60,8 @@ def build_graph(llm: MLXChatModel, send_email: bool = True):
     return graph.compile()
 
 
-async def _fetch_live_holdings() -> list[Holding]:
-    """Fetch real holdings from both brokers via MCP."""
+async def _fetch_live_holdings() -> tuple[list[Holding], list[str]]:
+    """Fetch real holdings from both brokers via MCP. Returns (holdings, warnings)."""
     from agents import agent_01_portfolio_ingestion
     return await agent_01_portfolio_ingestion.run()
 
@@ -87,12 +99,20 @@ def main():
     print(f"Loaded in {load_time:.1f}s — active: {mem['active_gb']} GB | peak: {mem['peak_gb']} GB\n")
 
     # ── Fetch portfolio ──────────────────────────────────────────────────────
+    data_warnings: list[str] = []
+
     if args.mock:
         holdings = _load_mock_holdings()
     else:
         t1 = time.time()
-        holdings = asyncio.run(_fetch_live_holdings())
+        holdings, data_warnings = asyncio.run(_fetch_live_holdings())
         print(f"Portfolio fetched in {time.time() - t1:.1f}s\n")
+
+    if data_warnings:
+        print("DATA WARNINGS:")
+        for w in data_warnings:
+            print(f"  [WARN] {w}")
+        print()
 
     total_value = sum(h.value for h in holdings)
     equity_tickers = [h.ticker for h in holdings if h.asset_type != "cash"]
@@ -109,7 +129,10 @@ def main():
         "holdings": holdings,
         "tickers": equity_tickers,
         "total_value": total_value,
+        "data_warnings": data_warnings,
         "market_data": None,
+        "fundamentals": None,
+        "news_data": None,
         "analysis": None,
     }
 
