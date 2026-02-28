@@ -60,6 +60,9 @@ reports/*.txt
 reports/*.html
 reports/*.pdf
 
+# Holdings cache (runtime snapshots — may contain portfolio data)
+.cache/
+
 # OS
 .DS_Store
 Thumbs.db
