@@ -27,5 +27,14 @@ class PortfolioState(TypedDict):
     # Agent 5 output — dict[ticker, NewsSnapshot]
     news_data: Optional[dict[str, Any]]
 
+    # Agent 6 output — dict[ticker, EarningsSnapshot]
+    earnings_data: Optional[dict[str, Any]]
+
+    # Agent 7 output — dict[ticker, InsiderSnapshot]
+    insider_data: Optional[dict[str, Any]]
+
+    # Agent 8 output — PortfolioRiskSnapshot
+    risk_data: Optional[Any]
+
     # Agent 9 output
     analysis: Optional[PortfolioAnalysis]

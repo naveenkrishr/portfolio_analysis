@@ -20,6 +20,7 @@ import time
 
 from analysis.fundamentals import FundamentalSnapshot, compute
 from tools.yfinance_fundamentals import fetch_raw_info
+from cache.cache_manager import cache
 from state.models import Holding
 
 
@@ -28,6 +29,7 @@ from state.models import Holding
 def fetch(tickers: list[str]) -> dict[str, FundamentalSnapshot]:
     """
     Fetch and compute fundamentals for the given equity tickers.
+    Uses cache to skip tickers with fresh data (weekly TTL).
 
     Args:
         tickers: list of equity ticker symbols (no cash symbols)
@@ -35,8 +37,20 @@ def fetch(tickers: list[str]) -> dict[str, FundamentalSnapshot]:
     Returns:
         { ticker: FundamentalSnapshot }
     """
-    raw = fetch_raw_info(tickers)
-    return compute(tickers, raw)
+    cached, stale = cache.partition("fundamentals", tickers)
+    if cached:
+        print(f"  Cache hit: {list(cached.keys())}")
+
+    if stale:
+        raw = fetch_raw_info(stale)
+        fresh = compute(stale, raw)
+        for ticker, snap in fresh.items():
+            cache.set("fundamentals", ticker, snap)
+    else:
+        fresh = {}
+        print("  All tickers served from cache")
+
+    return {**cached, **fresh}
 
 
 # ── LangGraph node ────────────────────────────────────────────────────────────

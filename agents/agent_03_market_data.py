@@ -18,11 +18,13 @@ import time
 
 from analysis.technicals import TechnicalSnapshot, compute
 from tools.yfinance_client import fetch_price_history
+from cache.cache_manager import cache
 
 
 def fetch(tickers: list[str]) -> dict[str, TechnicalSnapshot]:
     """
     Fetch price history + compute technicals for a list of equity tickers.
+    Uses cache to skip tickers with fresh data.
 
     Args:
         tickers: equity ticker symbols (cash tickers are silently skipped
@@ -34,14 +36,28 @@ def fetch(tickers: list[str]) -> dict[str, TechnicalSnapshot]:
     print(f"\n[Agent 3] Fetching market data for: {tickers}")
     t0 = time.time()
 
-    history = fetch_price_history(tickers)
-    print(f"[Agent 3] Downloaded {len(history)}/{len(tickers)} tickers "
-          f"({time.time() - t0:.1f}s)")
+    # Check cache
+    cached, stale = cache.partition("price_history", tickers)
+    if cached:
+        print(f"[Agent 3] Cache hit: {list(cached.keys())}")
 
-    snapshots = compute(history)
-    print(f"[Agent 3] Technicals computed for {len(snapshots)} tickers")
+    if stale:
+        history = fetch_price_history(stale)
+        print(f"[Agent 3] Downloaded {len(history)}/{len(stale)} tickers "
+              f"({time.time() - t0:.1f}s)")
 
-    return snapshots
+        snapshots = compute(history)
+        for ticker, snap in snapshots.items():
+            cache.set("price_history", ticker, snap)
+    else:
+        snapshots = {}
+        print(f"[Agent 3] All tickers served from cache ({time.time() - t0:.1f}s)")
+
+    # Merge cached + freshly computed
+    result = {**cached, **snapshots}
+    print(f"[Agent 3] Technicals ready for {len(result)} tickers")
+
+    return result
 
 
 def run(state: dict) -> dict:

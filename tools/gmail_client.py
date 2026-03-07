@@ -19,19 +19,27 @@ def _server_params() -> StdioServerParameters:
 
 async def send_email(subject: str, body: str) -> str:
     """
-    Send an HTML email to REPORT_RECIPIENT via the Gmail MCP server.
-    Returns the server's response string (e.g. "Email sent successfully. Message ID: ...").
+    Send an HTML email to all REPORT_RECIPIENT addresses via the Gmail MCP server.
+    Supports comma-separated recipients in the env var.
+    Returns the server's response string(s).
     """
-    recipient = os.environ["REPORT_RECIPIENT"]
+    raw = os.environ["REPORT_RECIPIENT"]
+    recipients = [r.strip() for r in raw.split(",") if r.strip()]
+    responses = []
+
     async with stdio_client(_server_params()) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            result = await session.call_tool("send_email", {
-                "to":      recipient,
-                "subject": subject,
-                "body":    body,
-                "is_html": True,
-            })
-            if result.content:
-                return result.content[0].text
-            return "No response from Gmail MCP"
+            for recipient in recipients:
+                result = await session.call_tool("send_email", {
+                    "to":      recipient,
+                    "subject": subject,
+                    "body":    body,
+                    "is_html": True,
+                })
+                if result.content:
+                    responses.append(f"{recipient}: {result.content[0].text}")
+                else:
+                    responses.append(f"{recipient}: No response from Gmail MCP")
+
+    return " | ".join(responses)

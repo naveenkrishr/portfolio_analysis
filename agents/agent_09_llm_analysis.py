@@ -7,6 +7,9 @@ and produce prioritized recommendations + per-ticker analysis.
 Step 4: enriched with live technical data from Agent 3 (SMA, RSI, MACD, Bollinger).
 Step 5: enriched with fundamentals from Agent 4 (P/E, ROE, FCF, analyst ratings).
 Step 6: enriched with news & sentiment from Agent 5 (recent headlines, bullish/bearish).
+Step 7: enriched with earnings calendar from Agent 6 (upcoming earnings dates, EPS estimates).
+Step 8: enriched with insider trading data from Agent 7 (Form 4 filings, insider sentiment).
+Step 9: enriched with quantitative risk metrics from Agent 8 (VaR, beta, Sharpe, correlation, concentration).
         Falls back gracefully if any data source is absent.
         Data warnings (cache fallbacks, partial failures) shown at prompt top.
 """
@@ -37,6 +40,9 @@ def _build_prompt(
     market_data: dict | None = None,
     fundamentals: dict | None = None,
     news_data: dict | None = None,
+    earnings_data: dict | None = None,
+    insider_data: dict | None = None,
+    risk_data=None,
     data_warnings: list[str] | None = None,
 ) -> str:
     today = date.today().strftime("%B %d, %Y")
@@ -104,6 +110,39 @@ def _build_prompt(
             + "\n"
         )
 
+    # EARNINGS section from Agent 6
+    earnings_section = ""
+    if earnings_data:
+        lines = []
+        for ticker, snap in earnings_data.items():
+            lines.append(f"  {snap.summary()}")
+        earnings_section = (
+            "\nUPCOMING EARNINGS (factor timing into buy/hold/sell decisions)\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+
+    # INSIDER TRADING section from Agent 7
+    insider_section = ""
+    if insider_data:
+        lines = []
+        for ticker, snap in insider_data.items():
+            lines.append(f"  {snap.summary()}")
+        insider_section = (
+            "\nINSIDER TRADING (Form 4 filings — insider buying is bullish, heavy selling is bearish)\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+
+    # RISK METRICS section from Agent 8
+    risk_section = ""
+    if risk_data is not None:
+        risk_section = (
+            "\nQUANTITATIVE RISK ANALYSIS (use these metrics in your Portfolio Risk Assessment)\n"
+            + risk_data.summary()
+            + "\n"
+        )
+
     return f"""\
 Portfolio Analysis Request — {today}
 {warnings_section}
@@ -117,7 +156,7 @@ HOLDINGS
   {"Ticker":<8} {"Name":<42} {"Shares":>14}  {"Price":>10}  {"Value":>12}  {"Alloc":>6}  Account
   {"-"*120}
 {holdings_table}
-{market_section}{fundamentals_section}{news_section}
+{market_section}{fundamentals_section}{news_section}{earnings_section}{insider_section}{risk_section}
 Please analyze this portfolio and respond in EXACTLY this format:
 
 ## RECOMMENDED ACTIONS
@@ -161,6 +200,9 @@ def run(state: PortfolioState, llm) -> PortfolioState:
     market_data             = state.get("market_data")
     fundamentals            = state.get("fundamentals")
     news_data               = state.get("news_data")
+    earnings_data           = state.get("earnings_data")
+    insider_data            = state.get("insider_data")
+    risk_data               = state.get("risk_data")
     data_warnings           = state.get("data_warnings") or []
 
     prompt = _build_prompt(
@@ -168,6 +210,9 @@ def run(state: PortfolioState, llm) -> PortfolioState:
         market_data=market_data,
         fundamentals=fundamentals,
         news_data=news_data,
+        earnings_data=earnings_data,
+        insider_data=insider_data,
+        risk_data=risk_data,
         data_warnings=data_warnings,
     )
     messages = [

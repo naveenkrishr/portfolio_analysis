@@ -5,7 +5,10 @@ Portfolio Analysis — Runner
 Live portfolio (Robinhood MCP + Fidelity MCP)
   → Agent 3  (market data: price history + technicals via yfinance)
   → Agent 4  (fundamentals: P/E, ROE, FCF, analyst ratings via yfinance)
-  → Agent 5  (news & sentiment: recent headlines via yfinance)
+  → Agent 5  (news & sentiment: recent headlines via Finnhub + yfinance)
+  → Agent 6  (earnings & events: upcoming earnings via Finnhub calendar)
+  → Agent 7  (insider & institutional: Form 4 filings via Finnhub)
+  → Agent 8  (risk analysis: VaR, beta, Sharpe, correlation, concentration)
   → Agent 9  (LLM analysis — Qwen2.5-14B)
   → Agent 10 (HTML email via Gmail MCP)
 
@@ -22,6 +25,8 @@ import time
 from functools import partial
 
 from dotenv import load_dotenv
+load_dotenv()
+
 from langgraph.graph import END, START, StateGraph
 
 from mlx_wrapper import MLXChatModel
@@ -31,11 +36,12 @@ from agents import (
     agent_03_market_data,
     agent_04_fundamental,
     agent_05_news_sentiment,
+    agent_06_earnings_events,
+    agent_07_insider_institutional,
+    agent_08_risk_analysis,
     agent_09_llm_analysis,
     agent_10_report_delivery,
 )
-
-load_dotenv()
 
 DEFAULT_MODEL = "mlx-community/Qwen2.5-14B-Instruct-4bit"
 
@@ -46,11 +52,17 @@ def build_graph(llm: MLXChatModel, send_email: bool = True):
     graph.add_node("agent_03", agent_03_market_data.run)
     graph.add_node("agent_04", agent_04_fundamental.run)
     graph.add_node("agent_05", agent_05_news_sentiment.run)
+    graph.add_node("agent_06", agent_06_earnings_events.run)
+    graph.add_node("agent_07", agent_07_insider_institutional.run)
+    graph.add_node("agent_08", agent_08_risk_analysis.run)
     graph.add_node("agent_09", agent_09_node)
     graph.add_edge(START, "agent_03")
     graph.add_edge("agent_03", "agent_04")
     graph.add_edge("agent_04", "agent_05")
-    graph.add_edge("agent_05", "agent_09")
+    graph.add_edge("agent_05", "agent_06")
+    graph.add_edge("agent_06", "agent_07")
+    graph.add_edge("agent_07", "agent_08")
+    graph.add_edge("agent_08", "agent_09")
     if send_email:
         graph.add_node("agent_10", agent_10_report_delivery.run)
         graph.add_edge("agent_09", "agent_10")
@@ -133,6 +145,9 @@ def main():
         "market_data": None,
         "fundamentals": None,
         "news_data": None,
+        "earnings_data": None,
+        "insider_data": None,
+        "risk_data": None,
         "analysis": None,
     }
 
