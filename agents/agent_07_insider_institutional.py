@@ -68,12 +68,16 @@ def run(state: dict) -> dict:
     Cash positions are excluded (asset_type == "cash").
     """
     holdings: list[Holding] = state["holdings"]
-    equity_tickers = [h.ticker for h in holdings if h.asset_type != "cash"]
+    # Only fetch insider data for stocks — ETFs don't have Form 4 filings
+    equity_tickers = [h.ticker for h in holdings if h.asset_type == "stock"]
 
     print("\n" + "="*70)
     print("AGENT 7 — Insider & Institutional")
     print("="*70)
-    print(f"Fetching insider data for: {', '.join(equity_tickers)}")
+    skipped_etfs = [h.ticker for h in holdings if h.asset_type == "etf"]
+    if skipped_etfs:
+        print(f"Skipping ETFs (no insider data): {', '.join(skipped_etfs)}")
+    print(f"Fetching insider data for: {', '.join(equity_tickers) or '(none)'}")
 
     t0 = time.time()
     insider_data = fetch(equity_tickers)

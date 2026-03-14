@@ -144,6 +144,7 @@ def main():
         "data_warnings": data_warnings,
         "market_data": None,
         "fundamentals": None,
+        "etf_data": None,
         "news_data": None,
         "earnings_data": None,
         "insider_data": None,

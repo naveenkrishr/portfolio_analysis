@@ -4,6 +4,7 @@ Agent 9 — LLM Portfolio Analysis (two-phase)
 Phase 1: Per-ticker analysis — one focused LLM call per equity position.
          Each call receives that ticker's data from agents 3-8 and produces
          a structured TickerAnalysis (recommendation, priority, action, assessment).
+         Stocks and ETFs get different prompts with relevant questions.
 
 Phase 2: Portfolio synthesis — one streamed LLM call that aggregates all
          per-ticker analyses + portfolio-level risk metrics into the final
@@ -11,10 +12,11 @@ Phase 2: Portfolio synthesis — one streamed LLM call that aggregates all
 
 Data sources (agents 3-8):
   - Agent 3: technicals (SMA, RSI, MACD, Bollinger)
-  - Agent 4: fundamentals (P/E, ROE, FCF, analyst ratings)
+  - Agent 4: fundamentals (P/E, ROE, FCF, analyst ratings) — stocks only
+  - Agent 4: ETF data (expense ratio, AUM, holdings, sectors) — ETFs only
   - Agent 5: news & sentiment (recent headlines, bullish/bearish)
-  - Agent 6: earnings calendar (upcoming dates, EPS estimates)
-  - Agent 7: insider trading (Form 4 filings, insider sentiment)
+  - Agent 6: earnings calendar (upcoming dates, EPS estimates) — stocks only
+  - Agent 7: insider trading (Form 4 filings, insider sentiment) — stocks only
   - Agent 8: risk metrics (VaR, beta, Sharpe, correlation, concentration)
 """
 from __future__ import annotations
@@ -57,7 +59,7 @@ def _build_ticker_prompt(
     insider_snap=None,
     ticker_risk=None,
 ) -> str:
-    """Build a focused prompt for analyzing a single equity position."""
+    """Build a focused prompt for analyzing a single stock position."""
     today = date.today().strftime("%B %d, %Y")
     pct = holding.value / total_value * 100 if total_value else 0
 
@@ -124,6 +126,89 @@ Respond in EXACTLY this format (no extra text):
 """
 
 
+def _build_etf_prompt(
+    holding: Holding,
+    total_value: float,
+    market_snap=None,
+    etf_snap=None,
+    news_snap=None,
+    ticker_risk=None,
+    all_holdings: list[Holding] | None = None,
+) -> str:
+    """Build a focused prompt for analyzing a single ETF position."""
+    today = date.today().strftime("%B %d, %Y")
+    pct = holding.value / total_value * 100 if total_value else 0
+
+    # Cost basis info
+    cost_info = ""
+    if holding.total_cost is not None:
+        gain = holding.value - holding.total_cost
+        gain_pct = (gain / holding.total_cost * 100) if holding.total_cost else 0
+        sign = "+" if gain >= 0 else ""
+        cost_info = (
+            f"  Cost basis:    ${holding.total_cost:>10,.0f}  (avg ${holding.avg_cost:,.2f}/sh)\n"
+            f"  Gain/Loss:     {sign}${gain:>9,.0f}  ({sign}{gain_pct:.1f}%)\n"
+        )
+
+    # Gather data sections
+    sections = []
+
+    if market_snap:
+        sections.append(f"TECHNICAL DATA\n  {market_snap.summary()}")
+    if etf_snap:
+        sections.append(f"ETF FUNDAMENTALS\n  {etf_snap.summary()}")
+    if news_snap:
+        sections.append(f"RECENT NEWS & SENTIMENT\n{news_snap.summary()}")
+    if ticker_risk:
+        sections.append(f"RISK METRICS\n  {ticker_risk.summary()}")
+
+    # Overlap detection: check if individual stocks in portfolio overlap with ETF holdings
+    overlap_section = ""
+    if etf_snap and etf_snap.top_holdings and all_holdings:
+        stock_tickers = {h.ticker for h in all_holdings if h.asset_type == "stock"}
+        etf_holding_tickers = set(etf_snap.top_holdings)
+        overlap = stock_tickers & etf_holding_tickers
+        if overlap:
+            overlap_section = f"\nHOLDINGS OVERLAP\n  You also hold these stocks individually: {', '.join(sorted(overlap))}\n  This creates duplicate exposure."
+
+    data_block = "\n\n".join(sections) if sections else "No additional data available."
+
+    return f"""\
+ETF Position Analysis — {today}
+
+POSITION
+  Ticker:      {holding.ticker}
+  Name:        {holding.name}
+  Type:        ETF
+  Shares:      {holding.shares:,.2f}
+  Price:       ${holding.price:,.2f}
+  Value:       ${holding.value:,.0f}
+  Allocation:  {pct:.1f}% of ${total_value:,.0f} portfolio
+{cost_info}
+{data_block}
+{overlap_section}
+
+Analyze this ETF position considering:
+- Is the expense ratio competitive for this category?
+- Is the fund size (AUM) adequate? (>$1B = good liquidity, lower closure risk)
+- Is the allocation ({pct:.1f}%) appropriate as a core or satellite holding?
+- What do the technicals suggest about entry/exit timing?
+- Any holdings overlap with other positions in the portfolio?
+- Dividend/distribution yield vs alternatives?
+- Risk metrics (beta, volatility)?
+- Category fit — does this ETF serve the right role in the portfolio?
+
+Respond in EXACTLY this format (no extra text):
+
+**Recommendation:** BUY / ADD / HOLD / REDUCE / SELL
+**Priority:** CRITICAL / HIGH / MEDIUM / LOW
+**Action:** one-line action item (be specific, e.g. "Core holding — maintain current allocation")
+**Role in portfolio:** what this ETF does for the portfolio (e.g. "Core large-cap exposure")
+**Assessment:** 2-3 sentences on fund quality, cost efficiency, and fit
+**Key risks:** risk1, risk2, risk3 (comma-separated, max 3)
+"""
+
+
 def _parse_ticker_response(ticker: str, raw: str) -> TickerAnalysis:
     """Parse the structured LLM output into a TickerAnalysis model."""
     def _extract(label: str, default: str = "") -> str:
@@ -170,12 +255,15 @@ def _build_synthesis_prompt(
     ticker_analyses: list[TickerAnalysis],
     risk_data=None,
     data_warnings: list[str] | None = None,
+    etf_data: dict | None = None,
 ) -> str:
     """Build the synthesis prompt from per-ticker analyses + portfolio data."""
     today = date.today().strftime("%B %d, %Y")
 
     invested   = sum(h.value for h in holdings if h.asset_type != "cash")
     cash_total = sum(h.value for h in holdings if h.asset_type == "cash")
+    etf_value  = sum(h.value for h in holdings if h.asset_type == "etf")
+    stock_value = sum(h.value for h in holdings if h.asset_type == "stock")
 
     # Holdings table
     rows = []
@@ -197,7 +285,7 @@ def _build_synthesis_prompt(
             f"{cost_str}  "
             f"{gl_str}  "
             f"{pct:>5.1f}%  "
-            f"[{h.account}]"
+            f"[{h.asset_type}]"
         )
     holdings_table = "\n".join(rows)
 
@@ -229,6 +317,25 @@ def _build_synthesis_prompt(
             + "\n"
         )
 
+    # ETF overlap analysis
+    overlap_section = ""
+    if etf_data:
+        stock_tickers = {h.ticker for h in holdings if h.asset_type == "stock"}
+        overlaps = []
+        for etf_ticker, snap in etf_data.items():
+            if hasattr(snap, "top_holdings") and snap.top_holdings:
+                etf_holdings_set = set(snap.top_holdings)
+                common = stock_tickers & etf_holdings_set
+                if common:
+                    overlaps.append(f"  {etf_ticker} shares holdings with: {', '.join(sorted(common))}")
+        if overlaps:
+            overlap_section = "\nHOLDINGS OVERLAP (ETFs vs individual stocks)\n" + "\n".join(overlaps) + "\n"
+
+    # Asset type breakdown
+    num_stocks = len([h for h in holdings if h.asset_type == "stock"])
+    num_etfs = len([h for h in holdings if h.asset_type == "etf"])
+    num_cash = len([h for h in holdings if h.asset_type == "cash"])
+
     return f"""\
 Portfolio Synthesis Report — {today}
 {warnings_section}
@@ -236,16 +343,18 @@ PORTFOLIO OVERVIEW
   Total Value:   ${total_value:>12,.0f}
   Invested:      ${invested:>12,.0f}  ({invested/total_value*100:.1f}%)
   Cash & MM:     ${cash_total:>12,.0f}  ({cash_total/total_value*100:.1f}%)
-  Positions:     {len([h for h in holdings if h.asset_type != 'cash'])} equity  +  {len([h for h in holdings if h.asset_type == 'cash'])} cash
+  Stocks:        ${stock_value:>12,.0f}  ({stock_value/total_value*100:.1f}%)
+  ETFs:          ${etf_value:>12,.0f}  ({etf_value/total_value*100:.1f}%)
+  Positions:     {num_stocks} stocks  +  {num_etfs} ETFs  +  {num_cash} cash
 
 HOLDINGS
-  {"Ticker":<8} {"Name":<42} {"Shares":>14}  {"Price":>10}  {"Value":>12}  {"Cost":>11}  {"Gain/Loss":>20}  {"Alloc":>6}  Account
+  {"Ticker":<8} {"Name":<42} {"Shares":>14}  {"Price":>10}  {"Value":>12}  {"Cost":>11}  {"Gain/Loss":>20}  {"Alloc":>6}  Type
   {"-"*160}
 {holdings_table}
 
 PER-TICKER ANALYSES (completed individually — incorporate these faithfully)
 {ticker_block}
-{risk_section}
+{risk_section}{overlap_section}
 Using the per-ticker analyses above and the portfolio-level risk metrics, \
 produce the final portfolio report in EXACTLY this format:
 
@@ -256,7 +365,8 @@ Sort by priority (CRITICAL first). Use the per-ticker recommendations above.
 
 ## EXECUTIVE SUMMARY
 2-3 sentences. Overall portfolio health, biggest strength, biggest concern. \
-Consider how the positions work together, not just individually.
+Consider how stocks and ETFs work together, any holdings overlap, and overall \
+diversification between individual stocks and index/ETF exposure.
 
 ## PER-TICKER ANALYSIS
 
@@ -266,7 +376,7 @@ Consider how the positions work together, not just individually.
 **Assessment:** (from per-ticker analysis — expand with portfolio context)
 **Key risks:** (from per-ticker analysis)
 
-(repeat for each non-cash position)
+(repeat for each non-cash position — both stocks and ETFs)
 
 ## CASH POSITION
 Comment on the ${cash_total:,.0f} in money market / cash ({cash_total/total_value*100:.1f}% of portfolio). \
@@ -274,7 +384,8 @@ Is it too high, appropriate, or should it be deployed?
 
 ## PORTFOLIO RISK ASSESSMENT
 - Concentration risk:
-- Diversification:
+- Diversification (stocks vs ETFs vs cash):
+- Holdings overlap (ETFs containing individually held stocks):
 - Correlation risk:
 - Overall rating: (CONSERVATIVE / BALANCED / AGGRESSIVE / OVER-CONCENTRATED)
 """
@@ -287,12 +398,14 @@ def run(state: PortfolioState, llm) -> PortfolioState:
     LangGraph node — two-phase LLM analysis.
 
     Phase 1: Per-ticker calls (sequential, non-streaming) → TickerAnalysis list
+             Stocks get stock-specific prompts; ETFs get ETF-specific prompts.
     Phase 2: Synthesis call (streaming) → final markdown report
     """
     holdings: list[Holding] = state["holdings"]
     total_value: float      = state["total_value"]
     market_data             = state.get("market_data") or {}
     fundamentals            = state.get("fundamentals") or {}
+    etf_data                = state.get("etf_data") or {}
     news_data               = state.get("news_data") or {}
     earnings_data           = state.get("earnings_data") or {}
     insider_data            = state.get("insider_data") or {}
@@ -312,23 +425,35 @@ def run(state: PortfolioState, llm) -> PortfolioState:
 
     for i, h in enumerate(equity_holdings):
         t0 = time.time()
-        print(f"\n  [{i+1}/{len(equity_holdings)}] {h.ticker}...", end="", flush=True)
+        print(f"\n  [{i+1}/{len(equity_holdings)}] {h.ticker} ({h.asset_type})...", end="", flush=True)
 
-        # Gather per-ticker data from each agent
+        # Gather per-ticker risk data
         ticker_risk = None
         if risk_data is not None and hasattr(risk_data, "ticker_risks"):
             ticker_risk = risk_data.ticker_risks.get(h.ticker)
 
-        prompt = _build_ticker_prompt(
-            holding=h,
-            total_value=total_value,
-            market_snap=market_data.get(h.ticker),
-            fundamental_snap=fundamentals.get(h.ticker),
-            news_snap=news_data.get(h.ticker),
-            earnings_snap=earnings_data.get(h.ticker),
-            insider_snap=insider_data.get(h.ticker),
-            ticker_risk=ticker_risk,
-        )
+        # Build prompt based on asset type
+        if h.asset_type == "etf":
+            prompt = _build_etf_prompt(
+                holding=h,
+                total_value=total_value,
+                market_snap=market_data.get(h.ticker),
+                etf_snap=etf_data.get(h.ticker),
+                news_snap=news_data.get(h.ticker),
+                ticker_risk=ticker_risk,
+                all_holdings=holdings,
+            )
+        else:
+            prompt = _build_ticker_prompt(
+                holding=h,
+                total_value=total_value,
+                market_snap=market_data.get(h.ticker),
+                fundamental_snap=fundamentals.get(h.ticker),
+                news_snap=news_data.get(h.ticker),
+                earnings_snap=earnings_data.get(h.ticker),
+                insider_snap=insider_data.get(h.ticker),
+                ticker_risk=ticker_risk,
+            )
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
@@ -368,6 +493,7 @@ def run(state: PortfolioState, llm) -> PortfolioState:
         ticker_analyses=ticker_analyses,
         risk_data=risk_data,
         data_warnings=data_warnings,
+        etf_data=etf_data,
     )
 
     messages = [

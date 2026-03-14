@@ -1,41 +1,35 @@
 """
 Agent 4 — Fundamental Analysis
 
-Fetches fundamental data for all equity positions using yfinance .info.
+Fetches fundamental data for equity positions using yfinance .info.
 Cash symbols (SPAXX, FCASH, etc.) are automatically excluded.
+ETFs get ETF-specific data (expense ratio, AUM, holdings) instead of stock fundamentals.
 
 Data pipeline:
-  tools/yfinance_fundamentals.py  →  fetch_raw_info()
-  analysis/fundamentals.py        →  compute()   →  FundamentalSnapshot per ticker
-  state["fundamentals"]           →  dict[ticker, FundamentalSnapshot]
+  Stocks: tools/yfinance_fundamentals.py → analysis/fundamentals.py → FundamentalSnapshot
+  ETFs:   tools/yfinance_etf.py          → analysis/etf_info.py     → ETFSnapshot
 
-Source waterfall (future):
-  PRIMARY:   yfinance .info  (no key, ~2000/hr)
-  SECONDARY: Finnhub         (needs FINNHUB_API_KEY, 60/min)
-  TERTIARY:  FMP             (needs FMP_API_KEY, 250/day)
+  state["fundamentals"] → dict[ticker, FundamentalSnapshot]  (stocks only)
+  state["etf_data"]     → dict[ticker, ETFSnapshot]          (ETFs only)
 """
 from __future__ import annotations
 
 import time
 
 from analysis.fundamentals import FundamentalSnapshot, compute
+from analysis.etf_info import ETFSnapshot, compute as compute_etf
 from tools.yfinance_fundamentals import fetch_raw_info
+from tools.yfinance_etf import fetch_etf_info
 from cache.cache_manager import cache
 from state.models import Holding
 
 
-# ── Standalone entry point (testable without LangGraph) ───────────────────────
+# ── Standalone entry points ───────────────────────────────────────────────────
 
 def fetch(tickers: list[str]) -> dict[str, FundamentalSnapshot]:
     """
-    Fetch and compute fundamentals for the given equity tickers.
+    Fetch and compute fundamentals for the given stock tickers.
     Uses cache to skip tickers with fresh data (weekly TTL).
-
-    Args:
-        tickers: list of equity ticker symbols (no cash symbols)
-
-    Returns:
-        { ticker: FundamentalSnapshot }
     """
     cached, stale = cache.partition("fundamentals", tickers)
     if cached:
@@ -48,7 +42,28 @@ def fetch(tickers: list[str]) -> dict[str, FundamentalSnapshot]:
             cache.set("fundamentals", ticker, snap)
     else:
         fresh = {}
-        print("  All tickers served from cache")
+        print("  All stock tickers served from cache")
+
+    return {**cached, **fresh}
+
+
+def fetch_etf(tickers: list[str]) -> dict[str, ETFSnapshot]:
+    """
+    Fetch and compute ETF-specific data for the given ETF tickers.
+    Uses cache to skip tickers with fresh data (weekly TTL).
+    """
+    cached, stale = cache.partition("etf_info", tickers)
+    if cached:
+        print(f"  ETF cache hit: {list(cached.keys())}")
+
+    if stale:
+        raw_info, top_holdings = fetch_etf_info(stale)
+        fresh = compute_etf(stale, raw_info, top_holdings)
+        for ticker, snap in fresh.items():
+            cache.set("etf_info", ticker, snap)
+    else:
+        fresh = {}
+        print("  All ETF tickers served from cache")
 
     return {**cached, **fresh}
 
@@ -57,22 +72,35 @@ def fetch(tickers: list[str]) -> dict[str, FundamentalSnapshot]:
 
 def run(state: dict) -> dict:
     """
-    LangGraph node — fetches fundamentals for all equity positions.
-    Adds state["fundamentals"] = dict[ticker, FundamentalSnapshot].
+    LangGraph node — fetches fundamentals for stocks and ETF data for ETFs.
+    Adds state["fundamentals"] and state["etf_data"].
     Cash positions are excluded (asset_type == "cash").
     """
     holdings: list[Holding] = state["holdings"]
-    equity_tickers = [h.ticker for h in holdings if h.asset_type != "cash"]
+    stock_tickers = [h.ticker for h in holdings if h.asset_type == "stock"]
+    etf_tickers = [h.ticker for h in holdings if h.asset_type == "etf"]
 
     print("\n" + "="*70)
     print("AGENT 4 — Fundamental Analysis")
     print("="*70)
-    print(f"Fetching fundamentals for: {', '.join(equity_tickers)}")
 
     t0 = time.time()
-    fundamentals = fetch(equity_tickers)
+
+    # Fetch stock fundamentals
+    fundamentals = {}
+    if stock_tickers:
+        print(f"Fetching stock fundamentals for: {', '.join(stock_tickers)}")
+        fundamentals = fetch(stock_tickers)
+        print(f"  Stocks: {len(fundamentals)}/{len(stock_tickers)} retrieved")
+
+    # Fetch ETF data
+    etf_data = {}
+    if etf_tickers:
+        print(f"Fetching ETF data for: {', '.join(etf_tickers)}")
+        etf_data = fetch_etf(etf_tickers)
+        print(f"  ETFs: {len(etf_data)}/{len(etf_tickers)} retrieved")
+
     elapsed = time.time() - t0
+    print(f"Done in {elapsed:.1f}s")
 
-    print(f"Done in {elapsed:.1f}s — {len(fundamentals)}/{len(equity_tickers)} tickers retrieved")
-
-    return {**state, "fundamentals": fundamentals}
+    return {**state, "fundamentals": fundamentals, "etf_data": etf_data}

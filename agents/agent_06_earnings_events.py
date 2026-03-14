@@ -56,12 +56,16 @@ def run(state: dict) -> dict:
     Cash positions are excluded (asset_type == "cash").
     """
     holdings: list[Holding] = state["holdings"]
-    equity_tickers = [h.ticker for h in holdings if h.asset_type != "cash"]
+    # Only fetch earnings for stocks — ETFs don't have earnings dates
+    equity_tickers = [h.ticker for h in holdings if h.asset_type == "stock"]
 
     print("\n" + "="*70)
     print("AGENT 6 — Earnings & Events")
     print("="*70)
-    print(f"Fetching earnings for: {', '.join(equity_tickers)}")
+    skipped_etfs = [h.ticker for h in holdings if h.asset_type == "etf"]
+    if skipped_etfs:
+        print(f"Skipping ETFs (no earnings): {', '.join(skipped_etfs)}")
+    print(f"Fetching earnings for: {', '.join(equity_tickers) or '(none)'}")
 
     t0 = time.time()
     earnings_data = fetch(equity_tickers)

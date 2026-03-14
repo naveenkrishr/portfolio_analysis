@@ -24,6 +24,9 @@ class PortfolioState(TypedDict):
     # Agent 4 output — dict[ticker, FundamentalSnapshot]
     fundamentals: Optional[dict[str, Any]]
 
+    # Agent 4 output — dict[ticker, ETFSnapshot] (ETF-specific data)
+    etf_data: Optional[dict[str, Any]]
+
     # Agent 5 output — dict[ticker, NewsSnapshot]
     news_data: Optional[dict[str, Any]]
 
