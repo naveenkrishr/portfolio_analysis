@@ -67,16 +67,32 @@ def build_holdings(
 
     progress_callback(f"Fetching prices for {len(non_cash)} tickers...")
     prices: dict[str, tuple[float, str]] = {}
-    if non_cash:
-        objs = yf.Tickers(" ".join(non_cash))
-        for ticker in non_cash:
+    for ticker in non_cash:
+        try:
+            t = yf.Ticker(ticker)
+            # Try fast_info first (more reliable, lighter API call)
+            price = 0.0
+            name = ticker
             try:
-                info = objs.tickers[ticker].info
-                price = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
-                name = info.get("shortName", ticker)[:50]
-                prices[ticker] = (float(price), name)
+                fi = t.fast_info
+                price = float(fi.get("lastPrice", 0) or fi.get("regularMarketPrice", 0) or 0)
             except Exception:
-                prices[ticker] = (0.0, ticker)
+                pass
+            # Fallback to .info if fast_info didn't work
+            if price == 0.0:
+                info = t.info
+                price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
+                name = info.get("shortName", ticker)[:50]
+            else:
+                try:
+                    name = t.info.get("shortName", ticker)[:50]
+                except Exception:
+                    pass
+            prices[ticker] = (price, name)
+            progress_callback(f"  {ticker}: ${price:,.2f}")
+        except Exception as e:
+            progress_callback(f"  {ticker}: price fetch failed ({e})")
+            prices[ticker] = (0.0, ticker)
 
     holdings: list[Holding] = []
     for ticker, data in consolidated.items():
