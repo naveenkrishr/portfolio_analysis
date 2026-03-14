@@ -25,7 +25,6 @@ from agents import (
     agent_07_insider_institutional,
     agent_08_risk_analysis,
     agent_09_llm_analysis,
-    agent_10_report_delivery,
 )
 from state.graph_state import PortfolioState
 from state.models import Holding
@@ -238,7 +237,8 @@ def run_analysis(
     final_state = app.invoke(initial_state)
 
     progress_callback("Generating HTML report...")
-    html = agent_10_report_delivery._build_html(final_state)
+    from agents.agent_10_report_delivery import _build_html
+    html = _build_html(final_state)
     progress_callback("Report ready")
 
     return html

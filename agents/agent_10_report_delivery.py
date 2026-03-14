@@ -23,7 +23,6 @@ from datetime import date
 
 from state.graph_state import PortfolioState
 from state.models import Holding
-from tools import gmail_client
 
 # ── Colour maps ───────────────────────────────────────────────────────────────
 
@@ -314,6 +313,7 @@ def run(state: PortfolioState) -> PortfolioState:
     print("[Agent 10] Sending via Gmail MCP...", flush=True)
     t0     = time.time()
     recipient = state.get("recipient_email")
+    from tools import gmail_client
     result = asyncio.run(gmail_client.send_email(subject=subject, body=html, to=recipient))
     print(f"[Agent 10] {result}  ({time.time()-t0:.1f}s)")
 
