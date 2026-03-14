@@ -36,6 +36,56 @@ _KNOWN_ETFS = {"VOO", "QQQ", "QQMG", "SPY", "IVV", "VTI", "VEA", "VWO",
                "BND", "SCHB", "SCHD", "JEPI", "JEPQ", "QQQM"}
 
 
+def _fetch_single_price(ticker: str, retries: int = 3) -> tuple[float, str]:
+    """
+    Fetch current price for a single ticker with retry + fallback strategies.
+    Returns (price, name). Returns (0.0, ticker) if all methods fail.
+
+    Strategy:
+    1. Try .history(period="5d") — lightweight, less rate-limited
+    2. Fallback to .info — more data but heavier API call
+    3. Retry with backoff on rate limiting
+    """
+    import time as _time
+
+    for attempt in range(retries):
+        try:
+            t = yf.Ticker(ticker)
+
+            # Method 1: history (lightest API call)
+            try:
+                hist = t.history(period="5d")
+                if not hist.empty:
+                    price = float(hist["Close"].iloc[-1])
+                    name = ticker
+                    # Try to get name without triggering rate limit
+                    try:
+                        name = t.info.get("shortName", ticker)[:50]
+                    except Exception:
+                        pass
+                    if price > 0:
+                        return (price, name)
+            except Exception:
+                pass
+
+            # Method 2: .info
+            info = t.info
+            price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
+            name = info.get("shortName", ticker)[:50]
+            if price > 0:
+                return (price, name)
+
+        except Exception as e:
+            err = str(e).lower()
+            if "rate" in err or "too many" in err:
+                wait = 2 ** attempt
+                _time.sleep(wait)
+                continue
+            break
+
+    return (0.0, ticker)
+
+
 def _classify(ticker: str) -> str:
     if ticker in _CASH_TICKERS:
         return "cash"
@@ -68,31 +118,12 @@ def build_holdings(
     progress_callback(f"Fetching prices for {len(non_cash)} tickers...")
     prices: dict[str, tuple[float, str]] = {}
     for ticker in non_cash:
-        try:
-            t = yf.Ticker(ticker)
-            # Try fast_info first (more reliable, lighter API call)
-            price = 0.0
-            name = ticker
-            try:
-                fi = t.fast_info
-                price = float(fi.get("lastPrice", 0) or fi.get("regularMarketPrice", 0) or 0)
-            except Exception:
-                pass
-            # Fallback to .info if fast_info didn't work
-            if price == 0.0:
-                info = t.info
-                price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
-                name = info.get("shortName", ticker)[:50]
-            else:
-                try:
-                    name = t.info.get("shortName", ticker)[:50]
-                except Exception:
-                    pass
-            prices[ticker] = (price, name)
-            progress_callback(f"  {ticker}: ${price:,.2f}")
-        except Exception as e:
-            progress_callback(f"  {ticker}: price fetch failed ({e})")
-            prices[ticker] = (0.0, ticker)
+        price, name = _fetch_single_price(ticker)
+        prices[ticker] = (price, name)
+        if price > 0:
+            progress_callback(f"  {ticker} ({name}): ${price:,.2f}")
+        else:
+            progress_callback(f"  {ticker}: could not fetch price, using avg cost")
 
     holdings: list[Holding] = []
     for ticker, data in consolidated.items():
