@@ -16,6 +16,8 @@ class Holding(BaseModel):
     value: float            # current market value
     account: str            # e.g. "Robinhood", "Fidelity-Z24", "Fidelity-Z31"
     asset_type: Literal["stock", "etf", "cash"]
+    avg_cost: Optional[float] = None   # average cost per share (if available)
+    total_cost: Optional[float] = None # total cost basis (avg_cost × shares)
 
 
 class TickerAnalysis(BaseModel):

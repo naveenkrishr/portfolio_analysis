@@ -10,3 +10,10 @@ mlx-lm>=0.21.0
 # Utils
 pydantic>=2.6.0
 python-dotenv>=1.0.1
+
+# Spreadsheet ingestion
+pandas>=2.0.0
+openpyxl>=3.1.0
+
+# Web UI
+streamlit>=1.40.0

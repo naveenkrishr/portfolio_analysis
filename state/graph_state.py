@@ -38,3 +38,6 @@ class PortfolioState(TypedDict):
 
     # Agent 9 output
     analysis: Optional[PortfolioAnalysis]
+
+    # Optional per-user email override (used by main_spreadsheet.py)
+    recipient_email: Optional[str]

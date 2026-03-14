@@ -71,6 +71,22 @@ def _holdings_table(holdings: list[Holding], total_value: float) -> str:
     for i, h in enumerate(holdings):
         bg  = "#ffffff" if i % 2 == 0 else "#f9f9f9"
         pct = h.value / total_value * 100
+
+        # Cost basis columns
+        if h.total_cost is not None:
+            cost_cell = f"${h.total_cost:,.0f}"
+            gain = h.value - h.total_cost
+            gain_pct = (gain / h.total_cost * 100) if h.total_cost else 0
+            gain_color = "#27ae60" if gain >= 0 else "#e74c3c"
+            sign = "+" if gain >= 0 else ""
+            gain_cell = (
+                f'<span style="color:{gain_color};font-weight:bold;">'
+                f'{sign}${gain:,.0f} ({sign}{gain_pct:.1f}%)</span>'
+            )
+        else:
+            cost_cell = '<span style="color:#ccc;">—</span>'
+            gain_cell = '<span style="color:#ccc;">—</span>'
+
         rows += f"""
   <tr style="background:{bg};border-bottom:1px solid #eee;">
     <td style="padding:10px;font-weight:bold;">{h.ticker}</td>
@@ -78,6 +94,8 @@ def _holdings_table(holdings: list[Holding], total_value: float) -> str:
     <td style="padding:10px;text-align:right;">{h.shares:,.2f}</td>
     <td style="padding:10px;text-align:right;">${h.price:,.2f}</td>
     <td style="padding:10px;text-align:right;">${h.value:,.0f}</td>
+    <td style="padding:10px;text-align:right;">{cost_cell}</td>
+    <td style="padding:10px;text-align:right;">{gain_cell}</td>
     <td style="padding:10px;text-align:right;">{pct:.1f}%</td>
     <td style="padding:10px;color:#888;font-size:12px;">{h.account}</td>
   </tr>"""
@@ -91,6 +109,8 @@ def _holdings_table(holdings: list[Holding], total_value: float) -> str:
       <th style="padding:10px;text-align:right;">Shares</th>
       <th style="padding:10px;text-align:right;">Price</th>
       <th style="padding:10px;text-align:right;">Value</th>
+      <th style="padding:10px;text-align:right;">Cost</th>
+      <th style="padding:10px;text-align:right;">Gain/Loss</th>
       <th style="padding:10px;text-align:right;">Alloc</th>
       <th style="padding:10px;text-align:left;">Account</th>
     </tr>
@@ -293,7 +313,8 @@ def run(state: PortfolioState) -> PortfolioState:
 
     print("[Agent 10] Sending via Gmail MCP...", flush=True)
     t0     = time.time()
-    result = asyncio.run(gmail_client.send_email(subject=subject, body=html))
+    recipient = state.get("recipient_email")
+    result = asyncio.run(gmail_client.send_email(subject=subject, body=html, to=recipient))
     print(f"[Agent 10] {result}  ({time.time()-t0:.1f}s)")
 
     return state

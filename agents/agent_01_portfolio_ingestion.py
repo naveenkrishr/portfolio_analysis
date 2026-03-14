@@ -61,6 +61,17 @@ def _parse_robinhood(raw: dict) -> list[Holding]:
             if shares <= 0:
                 continue
 
+            # Cost basis from Robinhood (average_buy_price)
+            avg_cost = None
+            total_cost = None
+            raw_abp = data.get("average_buy_price")
+            if raw_abp is not None:
+                try:
+                    avg_cost = float(raw_abp)
+                    total_cost = avg_cost * shares
+                except (ValueError, TypeError):
+                    pass
+
             holdings.append(Holding(
                 ticker=ticker.upper(),
                 name=name,
@@ -69,6 +80,8 @@ def _parse_robinhood(raw: dict) -> list[Holding]:
                 value=value,
                 account="Robinhood",
                 asset_type=_classify(ticker, rh_type),
+                avg_cost=avg_cost,
+                total_cost=total_cost,
             ))
         except (ValueError, TypeError):
             continue
@@ -142,6 +155,17 @@ def _merge(rh: list[Holding], fid: list[Holding]) -> list[Holding]:
         accounts = sorted({e.account for e in entries})
         account_label = " + ".join(accounts)
 
+        # Cost basis: sum total_cost from entries that have it,
+        # then derive weighted avg_cost
+        cost_entries = [e for e in entries if e.total_cost is not None]
+        if cost_entries:
+            merged_total_cost = sum(e.total_cost for e in cost_entries)
+            cost_shares = sum(e.shares for e in cost_entries)
+            merged_avg_cost = merged_total_cost / cost_shares if cost_shares else None
+        else:
+            merged_total_cost = None
+            merged_avg_cost = None
+
         merged.append(Holding(
             ticker=ticker,
             name=primary.name,
@@ -150,6 +174,8 @@ def _merge(rh: list[Holding], fid: list[Holding]) -> list[Holding]:
             value=total_value,
             account=account_label,
             asset_type=primary.asset_type,
+            avg_cost=merged_avg_cost,
+            total_cost=merged_total_cost,
         ))
 
     # Sort: equities by value desc, cash last

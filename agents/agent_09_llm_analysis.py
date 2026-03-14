@@ -1,29 +1,34 @@
 """
-Agent 9 — LLM Portfolio Analysis
+Agent 9 — LLM Portfolio Analysis (two-phase)
 
-Uses the local Qwen2.5-14B model (via MLXChatModel) to analyze the portfolio
-and produce prioritized recommendations + per-ticker analysis.
+Phase 1: Per-ticker analysis — one focused LLM call per equity position.
+         Each call receives that ticker's data from agents 3-8 and produces
+         a structured TickerAnalysis (recommendation, priority, action, assessment).
 
-Step 4: enriched with live technical data from Agent 3 (SMA, RSI, MACD, Bollinger).
-Step 5: enriched with fundamentals from Agent 4 (P/E, ROE, FCF, analyst ratings).
-Step 6: enriched with news & sentiment from Agent 5 (recent headlines, bullish/bearish).
-Step 7: enriched with earnings calendar from Agent 6 (upcoming earnings dates, EPS estimates).
-Step 8: enriched with insider trading data from Agent 7 (Form 4 filings, insider sentiment).
-Step 9: enriched with quantitative risk metrics from Agent 8 (VaR, beta, Sharpe, correlation, concentration).
-        Falls back gracefully if any data source is absent.
-        Data warnings (cache fallbacks, partial failures) shown at prompt top.
+Phase 2: Portfolio synthesis — one streamed LLM call that aggregates all
+         per-ticker analyses + portfolio-level risk metrics into the final
+         markdown report (same format agent_10 expects).
+
+Data sources (agents 3-8):
+  - Agent 3: technicals (SMA, RSI, MACD, Bollinger)
+  - Agent 4: fundamentals (P/E, ROE, FCF, analyst ratings)
+  - Agent 5: news & sentiment (recent headlines, bullish/bearish)
+  - Agent 6: earnings calendar (upcoming dates, EPS estimates)
+  - Agent 7: insider trading (Form 4 filings, insider sentiment)
+  - Agent 8: risk metrics (VaR, beta, Sharpe, correlation, concentration)
 """
 from __future__ import annotations
 
+import re
 import time
 from datetime import date
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from state.graph_state import PortfolioState
-from state.models import Holding, PortfolioAnalysis
+from state.models import Holding, PortfolioAnalysis, TickerAnalysis
 
-# ── System prompt ─────────────────────────────────────────────────────────────
+# ── System prompts ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
 You are an expert financial portfolio analyst. You provide clear, actionable \
@@ -32,39 +37,171 @@ position has problems, say so. You focus on what the investor should DO, not \
 just what the data says.\
 """
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
+SYNTHESIS_SYSTEM_PROMPT = """\
+You are an expert financial portfolio analyst synthesizing per-ticker analyses \
+into a cohesive portfolio report. You have already analyzed each position \
+individually — now produce the final report with portfolio-level insights, \
+cross-position interactions, and overall strategy. Preserve the per-ticker \
+recommendations faithfully. Be direct and actionable.\
+"""
 
-def _build_prompt(
+# ── Phase 1: Per-ticker prompt & parsing ─────────────────────────────────────
+
+def _build_ticker_prompt(
+    holding: Holding,
+    total_value: float,
+    market_snap=None,
+    fundamental_snap=None,
+    news_snap=None,
+    earnings_snap=None,
+    insider_snap=None,
+    ticker_risk=None,
+) -> str:
+    """Build a focused prompt for analyzing a single equity position."""
+    today = date.today().strftime("%B %d, %Y")
+    pct = holding.value / total_value * 100 if total_value else 0
+
+    # Cost basis info
+    cost_info = ""
+    if holding.total_cost is not None:
+        gain = holding.value - holding.total_cost
+        gain_pct = (gain / holding.total_cost * 100) if holding.total_cost else 0
+        sign = "+" if gain >= 0 else ""
+        cost_info = (
+            f"  Cost basis:    ${holding.total_cost:>10,.0f}  (avg ${holding.avg_cost:,.2f}/sh)\n"
+            f"  Gain/Loss:     {sign}${gain:>9,.0f}  ({sign}{gain_pct:.1f}%)\n"
+        )
+
+    # Gather data sections
+    sections = []
+
+    if market_snap:
+        sections.append(f"TECHNICAL DATA\n  {market_snap.summary()}")
+    if fundamental_snap:
+        sections.append(f"FUNDAMENTALS\n  {fundamental_snap.summary()}")
+    if news_snap:
+        sections.append(f"RECENT NEWS & SENTIMENT\n{news_snap.summary()}")
+    if earnings_snap:
+        sections.append(f"UPCOMING EARNINGS\n  {earnings_snap.summary()}")
+    if insider_snap:
+        sections.append(f"INSIDER TRADING\n  {insider_snap.summary()}")
+    if ticker_risk:
+        sections.append(f"RISK METRICS\n  {ticker_risk.summary()}")
+
+    data_block = "\n\n".join(sections) if sections else "No additional data available."
+
+    return f"""\
+Single Position Analysis — {today}
+
+POSITION
+  Ticker:      {holding.ticker}
+  Name:        {holding.name}
+  Type:        {holding.asset_type}
+  Shares:      {holding.shares:,.2f}
+  Price:       ${holding.price:,.2f}
+  Value:       ${holding.value:,.0f}
+  Allocation:  {pct:.1f}% of ${total_value:,.0f} portfolio
+{cost_info}
+{data_block}
+
+Analyze this position considering:
+- Is the allocation ({pct:.1f}%) appropriate for this type of holding?
+- What do the technicals suggest about timing?
+- Are fundamentals attractive at current valuation?
+- Any news catalysts or risks to watch?
+- Upcoming earnings impact?
+- What are insiders signaling?
+- Risk/reward profile?
+
+Respond in EXACTLY this format (no extra text):
+
+**Recommendation:** BUY / ADD / HOLD / REDUCE / SELL
+**Priority:** CRITICAL / HIGH / MEDIUM / LOW
+**Action:** one-line action item (be specific, e.g. "Reduce by 20% — overweight at 15%")
+**Role in portfolio:** what this position does for the portfolio
+**Assessment:** 2-3 sentences on quality, risks, and outlook
+**Key risks:** risk1, risk2, risk3 (comma-separated, max 3)
+"""
+
+
+def _parse_ticker_response(ticker: str, raw: str) -> TickerAnalysis:
+    """Parse the structured LLM output into a TickerAnalysis model."""
+    def _extract(label: str, default: str = "") -> str:
+        m = re.search(rf"\*\*{re.escape(label)}:\*\*\s*(.+?)(?=\n\*\*|\Z)", raw, re.DOTALL)
+        return m.group(1).strip() if m else default
+
+    rec_raw = _extract("Recommendation", "HOLD").upper().split()[0]
+    valid_recs = {"BUY", "ADD", "HOLD", "REDUCE", "SELL"}
+    recommendation = rec_raw if rec_raw in valid_recs else "HOLD"
+
+    pri_raw = _extract("Priority", "MEDIUM").upper().split()[0]
+    valid_pris = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+    priority = pri_raw if pri_raw in valid_pris else "MEDIUM"
+
+    action = _extract("Action", "Review position")
+    role = _extract("Role in portfolio", "")
+    assessment = _extract("Assessment", "")
+    risks = _extract("Key risks", "")
+
+    # Combine role + assessment + risks into the full analysis paragraph
+    parts = []
+    if role:
+        parts.append(f"Role: {role}")
+    if assessment:
+        parts.append(assessment)
+    if risks:
+        parts.append(f"Key risks: {risks}")
+    analysis_text = " ".join(parts) if parts else raw[:500]
+
+    return TickerAnalysis(
+        ticker=ticker,
+        recommendation=recommendation,
+        priority=priority,
+        action_summary=action,
+        analysis=analysis_text,
+    )
+
+
+# ── Phase 2: Synthesis prompt ────────────────────────────────────────────────
+
+def _build_synthesis_prompt(
     holdings: list[Holding],
     total_value: float,
-    market_data: dict | None = None,
-    fundamentals: dict | None = None,
-    news_data: dict | None = None,
-    earnings_data: dict | None = None,
-    insider_data: dict | None = None,
+    ticker_analyses: list[TickerAnalysis],
     risk_data=None,
     data_warnings: list[str] | None = None,
 ) -> str:
+    """Build the synthesis prompt from per-ticker analyses + portfolio data."""
     today = date.today().strftime("%B %d, %Y")
 
-    # Build allocation table
     invested   = sum(h.value for h in holdings if h.asset_type != "cash")
     cash_total = sum(h.value for h in holdings if h.asset_type == "cash")
 
+    # Holdings table
     rows = []
     for h in holdings:
         pct = h.value / total_value * 100
+        cost_str = f"${h.total_cost:>10,.0f}" if h.total_cost is not None else f"{'N/A':>11}"
+        if h.total_cost is not None:
+            gain = h.value - h.total_cost
+            gain_pct = (gain / h.total_cost * 100) if h.total_cost else 0
+            sign = "+" if gain >= 0 else ""
+            gl_str = f"{sign}${gain:>9,.0f} ({sign}{gain_pct:.1f}%)"
+        else:
+            gl_str = f"{'N/A':>20}"
         rows.append(
             f"  {h.ticker:<8} {h.name:<42} "
             f"{h.shares:>10,.2f} sh  "
             f"${h.price:>8,.2f}  "
             f"${h.value:>10,.0f}  "
+            f"{cost_str}  "
+            f"{gl_str}  "
             f"{pct:>5.1f}%  "
             f"[{h.account}]"
         )
     holdings_table = "\n".join(rows)
 
-    # Data freshness warnings (cache fallbacks, partial failures)
+    # Data warnings
     warnings_section = ""
     if data_warnings:
         lines = "\n".join(f"  - {w}" for w in data_warnings)
@@ -74,77 +211,26 @@ def _build_prompt(
             + "\nAccount for potential staleness in your analysis.\n"
         )
 
-    # MARKET DATA section from Agent 3 technicals
-    market_section = ""
-    if market_data:
-        lines = []
-        for ticker, snap in market_data.items():
-            lines.append(f"  {snap.summary()}")
-        market_section = (
-            "\nMARKET DATA (live technicals — SMA, RSI, MACD, Bollinger)\n"
-            + "\n".join(lines)
-            + "\n"
+    # Per-ticker analysis summaries
+    ticker_lines = []
+    for ta in ticker_analyses:
+        ticker_lines.append(
+            f"  {ta.ticker}: {ta.recommendation} ({ta.priority}) — {ta.action_summary}\n"
+            f"    {ta.analysis}"
         )
+    ticker_block = "\n\n".join(ticker_lines)
 
-    # FUNDAMENTALS section from Agent 4
-    fundamentals_section = ""
-    if fundamentals:
-        lines = []
-        for ticker, snap in fundamentals.items():
-            lines.append(f"  {snap.summary()}")
-        fundamentals_section = (
-            "\nFUNDAMENTALS (P/E, ROE, FCF, analyst ratings — use to assess valuation)\n"
-            + "\n".join(lines)
-            + "\n"
-        )
-
-    # NEWS section from Agent 5
-    news_section = ""
-    if news_data:
-        lines = []
-        for ticker, snap in news_data.items():
-            lines.append(snap.summary())
-        news_section = (
-            "\nRECENT NEWS & SENTIMENT (last 7 days — factor into your recommendations)\n"
-            + "\n".join(lines)
-            + "\n"
-        )
-
-    # EARNINGS section from Agent 6
-    earnings_section = ""
-    if earnings_data:
-        lines = []
-        for ticker, snap in earnings_data.items():
-            lines.append(f"  {snap.summary()}")
-        earnings_section = (
-            "\nUPCOMING EARNINGS (factor timing into buy/hold/sell decisions)\n"
-            + "\n".join(lines)
-            + "\n"
-        )
-
-    # INSIDER TRADING section from Agent 7
-    insider_section = ""
-    if insider_data:
-        lines = []
-        for ticker, snap in insider_data.items():
-            lines.append(f"  {snap.summary()}")
-        insider_section = (
-            "\nINSIDER TRADING (Form 4 filings — insider buying is bullish, heavy selling is bearish)\n"
-            + "\n".join(lines)
-            + "\n"
-        )
-
-    # RISK METRICS section from Agent 8
+    # Portfolio risk
     risk_section = ""
     if risk_data is not None:
         risk_section = (
-            "\nQUANTITATIVE RISK ANALYSIS (use these metrics in your Portfolio Risk Assessment)\n"
+            "\nQUANTITATIVE RISK ANALYSIS\n"
             + risk_data.summary()
             + "\n"
         )
 
     return f"""\
-Portfolio Analysis Request — {today}
+Portfolio Synthesis Report — {today}
 {warnings_section}
 PORTFOLIO OVERVIEW
   Total Value:   ${total_value:>12,.0f}
@@ -153,27 +239,32 @@ PORTFOLIO OVERVIEW
   Positions:     {len([h for h in holdings if h.asset_type != 'cash'])} equity  +  {len([h for h in holdings if h.asset_type == 'cash'])} cash
 
 HOLDINGS
-  {"Ticker":<8} {"Name":<42} {"Shares":>14}  {"Price":>10}  {"Value":>12}  {"Alloc":>6}  Account
-  {"-"*120}
+  {"Ticker":<8} {"Name":<42} {"Shares":>14}  {"Price":>10}  {"Value":>12}  {"Cost":>11}  {"Gain/Loss":>20}  {"Alloc":>6}  Account
+  {"-"*160}
 {holdings_table}
-{market_section}{fundamentals_section}{news_section}{earnings_section}{insider_section}{risk_section}
-Please analyze this portfolio and respond in EXACTLY this format:
+
+PER-TICKER ANALYSES (completed individually — incorporate these faithfully)
+{ticker_block}
+{risk_section}
+Using the per-ticker analyses above and the portfolio-level risk metrics, \
+produce the final portfolio report in EXACTLY this format:
 
 ## RECOMMENDED ACTIONS
 List each action on its own line as: [PRIORITY] TICKER — action description
 Priority levels: CRITICAL (act immediately) | HIGH (act within 2 weeks) | MEDIUM (act within a month) | LOW (informational)
-Sort by priority (CRITICAL first). Be specific — name the action, not just "review this position".
+Sort by priority (CRITICAL first). Use the per-ticker recommendations above.
 
 ## EXECUTIVE SUMMARY
-2-3 sentences. Overall portfolio health, biggest strength, biggest concern.
+2-3 sentences. Overall portfolio health, biggest strength, biggest concern. \
+Consider how the positions work together, not just individually.
 
 ## PER-TICKER ANALYSIS
 
-### VOO — Vanguard S&P 500 ETF
-**Recommendation:** HOLD / ADD / REDUCE / BUY / SELL
-**Role in portfolio:** (what this position does for the portfolio)
-**Assessment:** (2-3 sentences: quality of this holding, risks, outlook)
-**Key risks:** (bullet list, max 3)
+### TICKER — Name
+**Recommendation:** (from per-ticker analysis)
+**Role in portfolio:** (from per-ticker analysis)
+**Assessment:** (from per-ticker analysis — expand with portfolio context)
+**Key risks:** (from per-ticker analysis)
 
 (repeat for each non-cash position)
 
@@ -188,41 +279,101 @@ Is it too high, appropriate, or should it be deployed?
 - Overall rating: (CONSERVATIVE / BALANCED / AGGRESSIVE / OVER-CONCENTRATED)
 """
 
+
 # ── Agent node ────────────────────────────────────────────────────────────────
 
 def run(state: PortfolioState, llm) -> PortfolioState:
     """
-    LangGraph node — runs LLM analysis over the holdings in state.
-    llm is injected from main.py (MLXChatModel singleton).
+    LangGraph node — two-phase LLM analysis.
+
+    Phase 1: Per-ticker calls (sequential, non-streaming) → TickerAnalysis list
+    Phase 2: Synthesis call (streaming) → final markdown report
     """
     holdings: list[Holding] = state["holdings"]
     total_value: float      = state["total_value"]
-    market_data             = state.get("market_data")
-    fundamentals            = state.get("fundamentals")
-    news_data               = state.get("news_data")
-    earnings_data           = state.get("earnings_data")
-    insider_data            = state.get("insider_data")
+    market_data             = state.get("market_data") or {}
+    fundamentals            = state.get("fundamentals") or {}
+    news_data               = state.get("news_data") or {}
+    earnings_data           = state.get("earnings_data") or {}
+    insider_data            = state.get("insider_data") or {}
     risk_data               = state.get("risk_data")
     data_warnings           = state.get("data_warnings") or []
 
-    prompt = _build_prompt(
-        holdings, total_value,
-        market_data=market_data,
-        fundamentals=fundamentals,
-        news_data=news_data,
-        earnings_data=earnings_data,
-        insider_data=insider_data,
+    equity_holdings = [h for h in holdings if h.asset_type != "cash"]
+
+    # ── Phase 1: Per-ticker analysis ──────────────────────────────────────────
+
+    print("\n" + "=" * 70)
+    print(f"AGENT 9 — Per-Ticker Analysis ({len(equity_holdings)} positions)")
+    print("=" * 70)
+
+    ticker_analyses: list[TickerAnalysis] = []
+    phase1_t0 = time.time()
+
+    for i, h in enumerate(equity_holdings):
+        t0 = time.time()
+        print(f"\n  [{i+1}/{len(equity_holdings)}] {h.ticker}...", end="", flush=True)
+
+        # Gather per-ticker data from each agent
+        ticker_risk = None
+        if risk_data is not None and hasattr(risk_data, "ticker_risks"):
+            ticker_risk = risk_data.ticker_risks.get(h.ticker)
+
+        prompt = _build_ticker_prompt(
+            holding=h,
+            total_value=total_value,
+            market_snap=market_data.get(h.ticker),
+            fundamental_snap=fundamentals.get(h.ticker),
+            news_snap=news_data.get(h.ticker),
+            earnings_snap=earnings_data.get(h.ticker),
+            insider_snap=insider_data.get(h.ticker),
+            ticker_risk=ticker_risk,
+        )
+
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            result = llm.invoke(messages)
+            raw_text = result.content
+            ta = _parse_ticker_response(h.ticker, raw_text)
+        except Exception as e:
+            print(f" [ERROR: {e}]", end="")
+            ta = TickerAnalysis(
+                ticker=h.ticker,
+                recommendation="HOLD",
+                priority="LOW",
+                action_summary="Analysis unavailable — LLM error",
+                analysis=f"LLM analysis failed for {h.ticker}: {str(e)[:100]}",
+            )
+
+        ticker_analyses.append(ta)
+        elapsed = time.time() - t0
+        print(f" {ta.recommendation} ({ta.priority}) — {ta.action_summary}  ({elapsed:.1f}s)")
+
+    phase1_elapsed = time.time() - phase1_t0
+    print(f"\n  Per-ticker phase: {phase1_elapsed:.1f}s total")
+
+    # ── Phase 2: Portfolio synthesis (streamed) ───────────────────────────────
+
+    print("\n" + "=" * 70)
+    print("AGENT 9 — Portfolio Synthesis")
+    print("=" * 70 + "\n")
+
+    synthesis_prompt = _build_synthesis_prompt(
+        holdings=holdings,
+        total_value=total_value,
+        ticker_analyses=ticker_analyses,
         risk_data=risk_data,
         data_warnings=data_warnings,
     )
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(content=prompt),
-    ]
 
-    print("\n" + "="*70)
-    print("AGENT 9 — LLM Portfolio Analysis")
-    print("="*70 + "\n")
+    messages = [
+        SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT),
+        HumanMessage(content=synthesis_prompt),
+    ]
 
     t0 = time.time()
     full_text = ""
@@ -236,14 +387,15 @@ def run(state: PortfolioState, llm) -> PortfolioState:
     words = len(full_text.split())
     print(f"\n\n{'─'*70}")
     print(f"[{elapsed:.1f}s | ~{words/elapsed:.0f} words/s | {words} words]")
-    print("─"*70)
+    print(f"Total Agent 9: {time.time() - phase1_t0:.1f}s")
+    print("─" * 70)
 
     analysis = PortfolioAnalysis(
-        executive_summary="",        # Step 2: parse from raw_llm_output
-        recommended_actions=[],      # Step 2: parse from raw_llm_output
-        ticker_analyses=[],          # Step 2: parse from raw_llm_output
-        risk_summary="",             # Step 2: parse from raw_llm_output
-        raw_llm_output=full_text,    # preserved for now
+        executive_summary="",
+        recommended_actions=[],
+        ticker_analyses=ticker_analyses,
+        risk_summary="",
+        raw_llm_output=full_text,
     )
 
     return {**state, "analysis": analysis}

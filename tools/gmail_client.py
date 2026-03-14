@@ -17,13 +17,16 @@ def _server_params() -> StdioServerParameters:
     return StdioServerParameters(command=venv, args=[server])
 
 
-async def send_email(subject: str, body: str) -> str:
+async def send_email(subject: str, body: str, to: str | None = None) -> str:
     """
-    Send an HTML email to all REPORT_RECIPIENT addresses via the Gmail MCP server.
-    Supports comma-separated recipients in the env var.
+    Send an HTML email via the Gmail MCP server.
+
+    Args:
+        to: If provided, send to this address (single or comma-separated).
+            If None, falls back to REPORT_RECIPIENT env var.
     Returns the server's response string(s).
     """
-    raw = os.environ["REPORT_RECIPIENT"]
+    raw = to if to else os.environ["REPORT_RECIPIENT"]
     recipients = [r.strip() for r in raw.split(",") if r.strip()]
     responses = []
 

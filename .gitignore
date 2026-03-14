@@ -63,6 +63,12 @@ reports/*.pdf
 # Holdings cache (runtime snapshots — may contain portfolio data)
 .cache/
 
+# Spreadsheet input folder (may contain personal portfolio data)
+input/
+
+# Persisted holdings (may contain personal portfolio data)
+holdings.json
+
 # OS
 .DS_Store
 Thumbs.db
