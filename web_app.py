@@ -1,10 +1,11 @@
 """
-Streamlit Web UI for Portfolio Analysis.
+Streamlit Web UI for Portfolio Analysis (local — MLX).
 
 Enter holdings manually (ticker, quantity, avg_price) → run the full analysis
 pipeline (agents 3-9) → see the styled HTML report in the browser.
 
 Holdings are persisted to holdings.json between sessions.
+Mobile-friendly layout.
 
 Usage:
     streamlit run web_app.py
@@ -17,6 +18,7 @@ import sys
 import time
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -25,7 +27,7 @@ import streamlit.components.v1 as components
 st.set_page_config(
     page_title="Portfolio Analysis",
     page_icon="📊",
-    layout="wide",
+    layout="centered",
 )
 
 # ── Parse CLI args passed after "--" ─────────────────────────────────────────
@@ -81,44 +83,25 @@ def _save_holdings(rows: list[dict]):
     HOLDINGS_FILE.write_text(json.dumps(rows, indent=2))
 
 
-# Initialize session state from saved file
 if "holdings" not in st.session_state:
     st.session_state.holdings = _load_saved_holdings()
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.header("Settings")
-    st.caption(f"Model: `{args.model}`")
-    mem = llm.memory_stats()
-    st.caption(f"Memory: {mem['active_gb']} GB active / {mem['peak_gb']} GB peak")
-    st.divider()
-    st.markdown(
-        "**How to use:**\n"
-        "1. Add holdings using the form below\n"
-        "2. Click **Run Analysis**\n"
-        "3. Wait 2-5 minutes for the full analysis\n"
-        "4. View or download the report\n"
-    )
-
 # ── Main UI ──────────────────────────────────────────────────────────────────
 
-st.title("Portfolio Analysis")
+st.title("📊 Portfolio Analysis")
+mem = llm.memory_stats()
+st.caption(f"MLX — {args.model.split('/')[-1]} | {mem['active_gb']} GB")
 
-# ── Add holding form ─────────────────────────────────────────────────────────
+# ── Add holding form (stacked for mobile) ────────────────────────────────────
 
-st.subheader("Add Holding")
-col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
-
-with col1:
+with st.expander("Add Holding", expanded=len(st.session_state.holdings) == 0):
     new_ticker = st.text_input("Ticker", placeholder="e.g. AAPL", key="new_ticker")
-with col2:
-    new_qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="new_qty")
-with col3:
-    new_avg = st.number_input("Avg Price ($)", min_value=0.0, step=0.01, key="new_avg")
-with col4:
-    st.write("")  # spacing
-    st.write("")  # align button with inputs
+    col_qty, col_avg = st.columns(2)
+    with col_qty:
+        new_qty = st.number_input("Quantity", min_value=0.0, step=1.0, key="new_qty")
+    with col_avg:
+        new_avg = st.number_input("Avg Price ($)", min_value=0.0, step=0.01, key="new_avg")
+
     if st.button("Add", use_container_width=True):
         ticker = new_ticker.strip().upper()
         if ticker and new_qty > 0 and new_avg > 0:
@@ -135,38 +118,45 @@ with col4:
 # ── Current holdings table ───────────────────────────────────────────────────
 
 if st.session_state.holdings:
-    st.subheader(f"Holdings ({len(st.session_state.holdings)} rows)")
+    st.subheader(f"Holdings ({len(st.session_state.holdings)})")
 
-    # Display as a table with delete buttons
-    header_cols = st.columns([2, 1.5, 1.5, 1.5, 0.5])
-    header_cols[0].markdown("**Ticker**")
-    header_cols[1].markdown("**Quantity**")
-    header_cols[2].markdown("**Avg Price**")
-    header_cols[3].markdown("**Est. Value**")
-    header_cols[4].markdown("")
+    df = pd.DataFrame(st.session_state.holdings)
+    df["ticker"] = df["ticker"].str.upper()
+    df["est_value"] = df["quantity"] * df["avg_price"]
+    display_df = df.rename(columns={
+        "ticker": "Ticker",
+        "quantity": "Qty",
+        "avg_price": "Avg Price",
+        "est_value": "Est. Value",
+    })
+    display_df["Avg Price"] = display_df["Avg Price"].map("${:,.2f}".format)
+    display_df["Est. Value"] = display_df["Est. Value"].map("${:,.0f}".format)
+    display_df["Qty"] = display_df["Qty"].map("{:,.2f}".format)
 
-    to_delete = None
-    for i, row in enumerate(st.session_state.holdings):
-        cols = st.columns([2, 1.5, 1.5, 1.5, 0.5])
-        cols[0].write(row["ticker"])
-        cols[1].write(f"{row['quantity']:,.2f}")
-        cols[2].write(f"${row['avg_price']:,.2f}")
-        cols[3].write(f"${row['quantity'] * row['avg_price']:,.0f}")
-        if cols[4].button("X", key=f"del_{i}"):
-            to_delete = i
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+    )
 
-    if to_delete is not None:
-        st.session_state.holdings.pop(to_delete)
-        _save_holdings(st.session_state.holdings)
-        st.rerun()
-
-    # Clear all button
-    col_clear, col_spacer = st.columns([1, 4])
-    with col_clear:
-        if st.button("Clear All"):
-            st.session_state.holdings = []
-            _save_holdings([])
+    col_del, col_del_btn = st.columns([3, 1])
+    with col_del:
+        del_idx = st.selectbox(
+            "Remove row",
+            options=range(len(st.session_state.holdings)),
+            format_func=lambda i: f"{st.session_state.holdings[i]['ticker']} — {st.session_state.holdings[i]['quantity']} shares",
+            label_visibility="collapsed",
+        )
+    with col_del_btn:
+        if st.button("Remove", use_container_width=True):
+            st.session_state.holdings.pop(del_idx)
+            _save_holdings(st.session_state.holdings)
             st.rerun()
+
+    if st.button("Clear All", type="secondary"):
+        st.session_state.holdings = []
+        _save_holdings([])
+        st.rerun()
 
     st.divider()
 
@@ -191,13 +181,11 @@ if st.session_state.holdings:
 
         t0 = time.time()
         try:
-            # Build holdings (fetch current prices)
             holdings = build_holdings(
                 st.session_state.holdings,
                 progress_callback=progress_callback,
             )
 
-            # Run the pipeline
             html = run_analysis(
                 holdings=holdings,
                 llm=llm,
@@ -206,7 +194,6 @@ if st.session_state.holdings:
             )
             elapsed = time.time() - t0
 
-            # Final token flush
             if synthesis_tokens:
                 synthesis_placeholder.markdown(
                     "**LLM Synthesis (complete):**\n\n" + "".join(synthesis_tokens)
@@ -218,7 +205,6 @@ if st.session_state.holdings:
                 expanded=False,
             )
 
-            # Display report
             st.subheader("Report")
             components.html(html, height=2000, scrolling=True)
             st.download_button(
@@ -226,6 +212,7 @@ if st.session_state.holdings:
                 data=html,
                 file_name="portfolio_report.html",
                 mime="text/html",
+                use_container_width=True,
             )
 
         except Exception as e:
